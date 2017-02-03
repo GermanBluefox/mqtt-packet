@@ -62,7 +62,7 @@ function connect (opts, stream) {
 
   // Must be a string and non-falsy
   if (!protocolId ||
-     (typeof protocolId !== 'string' && !Buffer.isBuffer(protocolId))) {
+      (typeof protocolId !== 'string' && !Buffer.isBuffer(protocolId))) {
     stream.emit('error', new Error('Invalid protocol id'))
     return false
   } else length += protocolId.length + 2
@@ -75,7 +75,7 @@ function connect (opts, stream) {
 
   // ClientId might be omitted in 3.1.1, but only if cleanSession is set to 1
   if ((typeof clientId === 'string' || Buffer.isBuffer(clientId)) &&
-     (clientId || protocolVersion === 4) && (clientId || clean)) {
+      (clientId || protocolVersion === 4) && (clientId || clean)) {
     length += clientId.length + 2
   } else {
     if (protocolVersion < 4) {
@@ -152,18 +152,6 @@ function connect (opts, stream) {
     }
   }
 
-  // Generate header
-  stream.write(protocol.CONNECT_HEADER)
-
-  // Generate length
-  writeLength(stream, length)
-
-  // Generate protocol ID
-  writeStringOrBuffer(stream, protocolId)
-  stream.write(
-    protocolVersion === 4 ? protocol.VERSION4 : protocol.VERSION3
-  )
-
   // Connect flags
   var flags = 0
   flags |= username ? protocol.USERNAME_MASK : 0
@@ -173,23 +161,31 @@ function connect (opts, stream) {
   flags |= will ? protocol.WILL_FLAG_MASK : 0
   flags |= clean ? protocol.CLEAN_SESSION_MASK : 0
 
-  stream.write(new Buffer([flags]))
-
-  // Keepalive
-  writeNumber(stream, keepalive)
-
-  // Client ID
-  writeStringOrBuffer(stream, clientId)
+  var buffer = Buffer.concat([
+    // Header
+    protocol.CONNECT_HEADER,
+    // Length
+    genBufLengthCached(length),
+    // protocol ID
+    getStringOrBuffer(protocolId),
+    // Protocol Version
+    protocolVersion === 4 ? protocol.VERSION4 : protocol.VERSION3,
+    // Connect flags
+    new Buffer([flags]),
+    //keepalive
+    numCache[keepalive],
+    // Client ID
+    getStringOrBuffer(clientId)]
+  )
 
   // Will
-  if (will) {
-    writeString(stream, will.topic)
-    writeStringOrBuffer(stream, will.payload)
-  }
+  if (will) buffer = Buffer.concat([buffer, getStringBuffer(will.topic), getStringOrBuffer(will.payload)])
 
   // Username and password
-  if (username) writeStringOrBuffer(stream, username)
-  if (password) writeStringOrBuffer(stream, password)
+  if (username) buffer = Buffer.concat([buffer, getStringOrBuffer(username)])
+  if (password) buffer = Buffer.concat([buffer, getStringOrBuffer(password)])
+
+  stream.write(buffer)
 
   // This is a small packet that happens only once on a stream
   // We assume the stream is always free to receive more data after this
@@ -206,11 +202,18 @@ function connack (opts, stream) {
     return false
   }
 
-  stream.write(protocol.CONNACK_HEADER)
-  writeLength(stream, 2)
-  stream.write(opts.sessionPresent ? protocol.SESSIONPRESENT_HEADER : zeroBuf)
+  var buffer = Buffer.concat([
+    // Header
+    protocol.CONNACK_HEADER,
+    // Length
+    genBufLengthCached(2),
+    // Session
+    opts.sessionPresent ? protocol.SESSIONPRESENT_HEADER : zeroBuf,
+    // response code
+    new Buffer([rc])]
+  )
 
-  return stream.write(new Buffer([rc]))
+  return stream.write(buffer)
 }
 
 function publish (opts, stream) {
@@ -241,21 +244,23 @@ function publish (opts, stream) {
     return false
   } else if (qos) length += 2
 
-  // Header
-  stream.write(protocol.PUBLISH_HEADER[qos][opts.dup ? 1 : 0][retain ? 1 : 0])
-
-  // Remaining length
-  writeLength(stream, length)
-
-  // Topic
-  writeNumber(stream, byteLength(topic))
-  stream.write(topic)
+  var buffer = Buffer.concat([
+    // Header
+    protocol.PUBLISH_HEADER[qos][opts.dup ? 1 : 0][retain ? 1 : 0],
+    // Remaining length
+    genBufLengthCached(length),
+    // Topic length
+    numCache[byteLength(topic)],
+    // Topic text
+    new Buffer(topic)])
 
   // Message ID
-  if (qos > 0) writeNumber(stream, id)
+  if (qos > 0) buffer = Buffer.concat([buffer, numCache[id]])
 
-  // Payload
-  return stream.write(payload)
+  // payload
+  buffer = Buffer.concat([buffer, new Buffer(payload)])
+
+  return stream.write(buffer)
 }
 
 /* Puback, pubrec, pubrel and pubcomp */
@@ -274,14 +279,16 @@ function confirmation (opts, stream) {
     return false
   }
 
-  // Header
-  stream.write(protocol.ACKS[type][qos][dup][0])
+  var buffer = Buffer.concat([
+    // Header
+    protocol.ACKS[type][qos][dup][0],
+    // Length
+    genBufLengthCached(2),
+    // Message ID
+    numCache[id]]
+  )
 
-  // Length
-  writeLength(stream, 2)
-
-  // Message ID
-  return writeNumber(stream, id)
+  return stream.write(buffer)
 }
 
 function subscribe (opts, stream) {
@@ -320,16 +327,16 @@ function subscribe (opts, stream) {
     return false
   }
 
-  // Generate header
-  stream.write(protocol.SUBSCRIBE_HEADER[1][dup ? 1 : 0][0])
+  var buffer = Buffer.concat([
+    // Header
+    protocol.SUBSCRIBE_HEADER[1][dup ? 1 : 0][0],
+    // Length
+    genBufLengthCached(length),
+    // Message ID
+    numCache[id]]
+  )
 
-  // Generate length
-  writeLength(stream, length)
-
-  // Generate message ID
-  writeNumber(stream, id)
-
-  var result = true
+  var packet = [buffer]
 
   // Generate subs
   for (var j = 0; j < subs.length; j++) {
@@ -338,13 +345,13 @@ function subscribe (opts, stream) {
     var jqos = sub.qos
 
     // Write topic string
-    writeString(stream, jtopic)
+    packet.push(getStringBuffer(jtopic))
 
     // Write qos
-    result = stream.write(protocol.QOS[jqos])
+    packet.push(protocol.QOS[jqos])
   }
 
-  return result
+  return stream.write(Buffer.concat(packet))
 }
 
 function suback (opts, stream) {
@@ -374,16 +381,18 @@ function suback (opts, stream) {
     return false
   }
 
-  // header
-  stream.write(protocol.SUBACK_HEADER)
+  var buffer = Buffer.concat([
+    // header
+    protocol.SUBACK_HEADER,
+    // Length
+    genBufLengthCached(length),
+    // Message ID
+    numCache[id],
+    // is granted
+    new Buffer(granted)]
+  )
 
-  // Length
-  writeLength(stream, length)
-
-  // Message ID
-  writeNumber(stream, id)
-
-  return stream.write(new Buffer(granted))
+  return stream.write(buffer)
 }
 
 function unsubscribe (opts, stream) {
@@ -415,22 +424,25 @@ function unsubscribe (opts, stream) {
     return false
   }
 
-  // Header
-  stream.write(protocol.UNSUBSCRIBE_HEADER[1][dup ? 1 : 0][0])
 
-  // Length
-  writeLength(stream, length)
+  var buffer = Buffer.concat([
+    // Header
+    protocol.UNSUBSCRIBE_HEADER[1][dup ? 1 : 0][0],
+    // Length
+    genBufLengthCached(length),
+    // Message ID
+    numCache[id]]
+  )
 
-  // Message ID
-  writeNumber(stream, id)
+  var packet = [buffer]
 
-  // Unsubs
-  var result = true
+  // Generate subs
   for (var j = 0; j < unsubs.length; j++) {
-    result = writeString(stream, unsubs[j])
+    // Write topic string
+    packet.push(getStringBuffer(unsubs[j]))
   }
 
-  return result
+  return stream.write(Buffer.concat(packet))
 }
 
 function emptyPacket (opts, stream) {
@@ -467,19 +479,18 @@ function genBufLength (length) {
   return buffer
 }
 
+
+var lengthCache = {}
 /**
- * writeLength - write an MQTT style length field to the buffer
+ * genBufLengthCached - returns an MQTT style length field as buffer
  *
- * @param <Buffer> buffer - destination
- * @param <Number> pos - offset
- * @param <Number> length - length (>0)
- * @returns <Number> number of bytes written
+ * @param <Number> length - destination
+ * @returns <Buffer> buffer with length
  *
  * @api private
  */
 
-var lengthCache = {}
-function writeLength (stream, length) {
+function genBufLengthCached (length) {
   var buffer = lengthCache[length]
 
   if (!buffer) {
@@ -487,56 +498,36 @@ function writeLength (stream, length) {
     if (length < 16384) lengthCache[length] = buffer
   }
 
-  stream.write(buffer)
+  return buffer;
 }
 
 /**
- * writeString - write a utf8 string to the buffer
+ * getStringBuffer - returns a utf8 string as buffer
  *
- * @param <Buffer> buffer - destination
- * @param <Number> pos - offset
  * @param <String> string - string to write
- * @return <Number> number of bytes written
+ * @return <Buffer> buffer with MQTT string
  *
  * @api private
  */
 
-function writeString (stream, string) {
+function getStringBuffer (string) {
   var strlen = Buffer.byteLength(string)
-  writeNumber(stream, strlen)
-
-  stream.write(string, 'utf8')
+  return Buffer.concat(numCache[strlen], new Buffer(string, 'utf8'));
 }
 
 /**
- * writeNumber - write a two byte number to the buffer
+ * getStringOrBuffer - returns a Buffer with the String or Buffer and its length as prefix
  *
- * @param <Buffer> buffer - destination
- * @param <Number> pos - offset
- * @param <String> number - number to write
- * @return <Number> number of bytes written
- *
- * @api private
+ * @param <String|Buffer> toWrite - String or Buffer
+ * @return <Buffer> Buffer to write it into MQTT stream
  */
-function writeNumber (stream, number) {
-  return stream.write(numCache[number])
-}
-
-/**
- * writeStringOrBuffer - write a String or Buffer with the its length prefix
- *
- * @param <Buffer> buffer - destination
- * @param <Number> pos - offset
- * @param <String> toWrite - String or Buffer
- * @return <Number> number of bytes written
- */
-function writeStringOrBuffer (stream, toWrite) {
-  if (toWrite && typeof toWrite === 'string') writeString(stream, toWrite)
+function getStringOrBuffer (toWrite) {
+  if (toWrite && typeof toWrite === 'string') return getStringBuffer(toWrite)
   else if (toWrite) {
-    writeNumber(stream, toWrite.length)
-    stream.write(toWrite)
-  } else writeNumber(stream, 0)
+    return Buffer.concat(numCache[toWrite.length, new Buffer(toWrite)]);
+  } else return numCache[0]
 }
+
 
 function byteLength (bufOrString) {
   if (!bufOrString) return 0
